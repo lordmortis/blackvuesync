@@ -87,6 +87,9 @@ dry_run = None  # pylint: disable=invalid-name
 # affinity key reserved for test isolation
 affinity_key: str | None = None  # pylint: disable=invalid-name
 
+# file to track downloaded recordings
+downloaded_file: str | None = None  # pylint: disable=invalid-name
+
 # keep and cutoff date; only recordings from this date on are downloaded and kept
 keep_re = re.compile(r"""(?P<range>\d+)(?P<unit>[dw]?)""")
 cutoff_date: datetime.date | None = None  # pylint: disable=invalid-name
@@ -435,6 +438,11 @@ def download_recording(base_url: str, recording: Recording, destination: str) ->
                 recording.direction,
                 speed_str,
             )
+
+            # optionally records the successfully downloaded recording
+            if downloaded_file:
+                with open(downloaded_file, "a", encoding="utf-8") as f:
+                    f.write(f"{recording.filename}\n")
         else:
             recording_logger.info(
                 "DRY RUN Would download recording : %s (%s%s)",
@@ -557,11 +565,20 @@ def get_downloaded_recordings(
 
     downloaded_filepaths = glob.glob(downloaded_filepath_glob)
 
-    return {
+    downloaded_recordings = {
         r
         for p in downloaded_filepaths
         if (r := to_downloaded_recording(os.path.basename(p), grouping)) is not None
     }
+
+    # optionally reads from the downloaded file
+    if downloaded_file and os.path.exists(downloaded_file):
+        with open(downloaded_file, encoding="utf-8") as f:
+            for line in f:
+                if r := to_downloaded_recording(line.strip(), grouping):
+                    downloaded_recordings.add(r)
+
+    return downloaded_recordings
 
 
 def get_outdated_recordings(
@@ -661,6 +678,10 @@ def sync(
         r for x in dashcam_filenames if (r := to_recording(x, grouping)) is not None
     ]
 
+    # already downloaded recordings
+    downloaded_recordings = get_downloaded_recordings(destination, grouping)
+    downloaded_base_filenames = {x.base_filename for x in downloaded_recordings}
+
     # figures out which recordings are current and should be downloaded
     current_dashcam_recordings = get_current_recordings(dashcam_recordings)
 
@@ -668,6 +689,13 @@ def sync(
     current_dashcam_recordings = get_filtered_recordings(
         current_dashcam_recordings, recording_filter
     )
+
+    # excludes recordings that have already been downloaded
+    current_dashcam_recordings = [
+        x
+        for x in current_dashcam_recordings
+        if x.base_filename not in downloaded_base_filenames
+    ]
 
     # sorts the dashcam recordings so we download them according to some priority
     sort_recordings(current_dashcam_recordings, download_priority)
@@ -828,6 +856,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true", help="shows what the program would do"
     )
     arg_parser.add_argument(
+        "--downloaded-file",
+        metavar="DOWNLOADED_FILE",
+        help="tracks successfully downloaded recordings in DOWNLOADED_FILE",
+    )
+    arg_parser.add_argument(
         "--affinity-key",
         metavar="AFFINITY_KEY",
         help="affinity key; reserved for test isolation",
@@ -852,11 +885,13 @@ def main() -> int:
     global cutoff_date
     global socket_timeout
     global affinity_key
+    global downloaded_file
 
     args = parse_args()
 
     dry_run = args.dry_run
     affinity_key = args.affinity_key
+    downloaded_file = args.downloaded_file
     if dry_run:
         logger.info("DRY RUN No action will be taken.")
 
@@ -881,6 +916,10 @@ def main() -> int:
         # prepares the local file destination
         destination = args.destination or os.getcwd()
         ensure_destination(destination)
+
+        # if the downloaded file is a relative path, make it relative to the destination
+        if downloaded_file and not os.path.isabs(downloaded_file):
+            downloaded_file = os.path.join(destination, downloaded_file)
 
         # grouping
         grouping = args.grouping
